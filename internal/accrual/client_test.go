@@ -56,6 +56,20 @@ func TestGetOrder_OK_StatusMapping(t *testing.T) {
 	}
 }
 
+func TestGetOrder_UnknownStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"order":"123","status":"SOME_NEW_STATUS"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	_, err := c.GetOrder(context.Background(), "123")
+	if !errors.Is(err, ErrUnknownStatus) {
+		t.Errorf("GetOrder() error = %v, want ErrUnknownStatus", err)
+	}
+}
+
 func TestGetOrder_NotRegistered(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

@@ -1,25 +1,30 @@
 // Package worker реализует фоновый опрос системы начислений и обновление
-// статусов заказов: одна горутина-fetcher опрашивает хранилище и
-// раздаёт заказы через канал пулу воркеров, которые обращаются к системе
-// начислений.
+// статусов заказов: по тикеру забирается пачка заказов, атомарно
+// помеченных в хранилище как взятые в обработку, и раздаётся пулу воркеров
+// на errgroup.Group с ограничением на число одновременных горутин.
 package worker
 
 import (
 	"context"
 	"errors"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/dismoralzor/go-musthave-diploma/internal/accrual"
 	"github.com/dismoralzor/go-musthave-diploma/internal/models"
 )
 
+// claimBatchSize — сколько заказов забирается из хранилища за один тик.
+// Значение выбрано с запасом относительно типичного numWorkers, чтобы пул
+// воркеров не простаивал в ожидании следующего тика.
+const claimBatchSize = 50
+
 // Store описывает доступ к заказам, необходимый воркеру.
 type Store interface {
-	GetOrdersForProcessing(ctx context.Context) ([]models.Order, error)
+	ClaimOrdersForProcessing(ctx context.Context, limit int) ([]models.Order, error)
 	UpdateOrderStatus(ctx context.Context, number, status string, accrual *float64, userID int64) error
 }
 
@@ -45,7 +50,8 @@ type Worker struct {
 }
 
 // New создаёт Worker, опрашивающий store с интервалом pollInterval и
-// обрабатывающий заказы пулом из numWorkers горутин через client.
+// обрабатывающий заказы пулом не более чем из numWorkers одновременных
+// горутин через client.
 func New(store Store, client AccrualClient, log *zap.Logger, numWorkers int, pollInterval time.Duration) *Worker {
 	return &Worker{
 		store:        store,
@@ -56,75 +62,39 @@ func New(store Store, client AccrualClient, log *zap.Logger, numWorkers int, pol
 	}
 }
 
-// Run запускает fetcher и пул воркеров и блокируется до их завершения.
-// Останавливается по отмене ctx.
+// Run по тикеру забирает пачку заказов и обрабатывает их пулом не более чем
+// из numWorkers одновременных горутин; g.Go блокируется при достижении
+// лимита, что даёт естественный backpressure. Останавливается по отмене ctx
+// и дожидается завершения уже начатых обращений к accrual.
 func (w *Worker) Run(ctx context.Context) {
-	jobs := make(chan models.Order)
-
-	var wg sync.WaitGroup
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		w.fetch(ctx, jobs)
-	}()
-
-	for i := 0; i < w.numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			w.process(ctx, jobs)
-		}()
-	}
-
-	wg.Wait()
-}
-
-// fetch по тикеру запрашивает у хранилища необработанные заказы и
-// отправляет их в jobs. Завершается по отмене ctx, закрывая jobs, чтобы
-// воркеры тоже завершились.
-func (w *Worker) fetch(ctx context.Context, jobs chan<- models.Order) {
-	defer close(jobs)
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(w.numWorkers)
 
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 
+loop:
 	for {
 		select {
-		case <-ctx.Done():
-			return
+		case <-gctx.Done():
+			break loop
 		case <-ticker.C:
-			orders, err := w.store.GetOrdersForProcessing(ctx)
+			orders, err := w.store.ClaimOrdersForProcessing(gctx, claimBatchSize)
 			if err != nil {
-				w.log.Error("fetch orders for processing", zap.Error(err))
+				w.log.Error("claim orders for processing", zap.Error(err))
 				continue
 			}
 
 			for _, o := range orders {
-				select {
-				case jobs <- o:
-				case <-ctx.Done():
-					return
-				}
+				g.Go(func() error {
+					w.processOrder(gctx, o)
+					return nil
+				})
 			}
 		}
 	}
-}
 
-// process читает заказы из jobs и опрашивает по ним систему начислений,
-// пока канал не закроется или не отменится ctx.
-func (w *Worker) process(ctx context.Context, jobs <-chan models.Order) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case o, ok := <-jobs:
-			if !ok {
-				return
-			}
-			w.processOrder(ctx, o)
-		}
-	}
+	_ = g.Wait()
 }
 
 // processOrder опрашивает систему начислений по одному заказу и обновляет

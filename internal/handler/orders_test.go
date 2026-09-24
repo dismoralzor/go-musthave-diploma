@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dismoralzor/go-musthave-diploma/internal/auth"
 	"github.com/dismoralzor/go-musthave-diploma/internal/models"
 	"github.com/dismoralzor/go-musthave-diploma/internal/storage"
 )
@@ -136,5 +137,22 @@ func TestListOrders(t *testing.T) {
 				t.Errorf("body = %q, want it to contain %q", w.Body.String(), tt.wantBody)
 			}
 		})
+	}
+}
+
+func BenchmarkUploadOrder(b *testing.B) {
+	orders := &fakeOrderStore{createOrder: func(ctx context.Context, number string, userID int64) error { return nil }}
+	router := NewRouter(New(&fakeUserStore{}, orders, &fakeBalanceStore{}))
+
+	token, err := auth.GenerateToken(1)
+	if err != nil {
+		b.Fatalf("auth.GenerateToken() unexpected error: %v", err)
+	}
+
+	for b.Loop() {
+		req := httptest.NewRequest(http.MethodPost, "/api/user/orders", strings.NewReader("12345678903"))
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
 	}
 }

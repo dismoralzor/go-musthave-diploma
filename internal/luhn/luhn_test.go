@@ -23,3 +23,9 @@ func TestValid(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkValid(b *testing.B) {
+	for b.Loop() {
+		Valid("12345678903")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"go.uber.org/zap"
@@ -13,7 +14,9 @@ import (
 )
 
 // fakeStore — тестовая реализация Store, потокобезопасно накапливающая
-// вызовы UpdateOrderStatus.
+// вызовы UpdateOrderStatus. Как и реальное хранилище, отдаёт каждый заказ
+// через ClaimOrdersForProcessing только один раз — дальнейшие вызовы его не
+// возвращают, пока он снова не станет NEW.
 type fakeStore struct {
 	mu      sync.Mutex
 	orders  []models.Order
@@ -27,10 +30,16 @@ type update struct {
 	userID  int64
 }
 
-func (s *fakeStore) GetOrdersForProcessing(ctx context.Context) ([]models.Order, error) {
+func (s *fakeStore) ClaimOrdersForProcessing(ctx context.Context, limit int) ([]models.Order, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.orders, nil
+
+	if limit > len(s.orders) {
+		limit = len(s.orders)
+	}
+	claimed := s.orders[:limit]
+	s.orders = s.orders[limit:]
+	return claimed, nil
 }
 
 func (s *fakeStore) UpdateOrderStatus(ctx context.Context, number, status string, accrual *float64, userID int64) error {
@@ -111,57 +120,59 @@ func TestProcessOrder_TooManyRequests_SetsGate(t *testing.T) {
 }
 
 func TestWaitForGate(t *testing.T) {
-	w := New(&fakeStore{}, &fakeClient{}, zap.NewNop(), 1, time.Second)
+	synctest.Test(t, func(t *testing.T) {
+		w := New(&fakeStore{}, &fakeClient{}, zap.NewNop(), 1, time.Second)
 
-	// Без выставленной паузы waitForGate не должен блокироваться.
-	if !w.waitForGate(context.Background()) {
-		t.Error("waitForGate() = false without pause, want true")
-	}
+		// Без выставленной паузы waitForGate не должен блокироваться.
+		if !w.waitForGate(context.Background()) {
+			t.Error("waitForGate() = false without pause, want true")
+		}
 
-	// С выставленной короткой паузой должен дождаться её истечения.
-	w.pauseUntil.Store(time.Now().Add(30 * time.Millisecond).UnixNano())
-	start := time.Now()
-	if !w.waitForGate(context.Background()) {
-		t.Error("waitForGate() = false, want true after pause elapses")
-	}
-	if time.Since(start) < 20*time.Millisecond {
-		t.Error("waitForGate() returned before the pause elapsed")
-	}
+		// С выставленной паузой должен дождаться её истечения. Внутри бабла
+		// synctest время виртуальное: этот Wait не занимает реальные 30ms.
+		w.pauseUntil.Store(time.Now().Add(30 * time.Millisecond).UnixNano())
+		start := time.Now()
+		if !w.waitForGate(context.Background()) {
+			t.Error("waitForGate() = false, want true after pause elapses")
+		}
+		if time.Since(start) != 30*time.Millisecond {
+			t.Errorf("waitForGate() waited %v, want exactly 30ms", time.Since(start))
+		}
 
-	// Отмена контекста во время ожидания должна прервать ожидание.
-	w.pauseUntil.Store(time.Now().Add(time.Hour).UnixNano())
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if w.waitForGate(ctx) {
-		t.Error("waitForGate() = true with cancelled context, want false")
-	}
+		// Отмена контекста во время ожидания должна прервать ожидание.
+		w.pauseUntil.Store(time.Now().Add(time.Hour).UnixNano())
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if w.waitForGate(ctx) {
+			t.Error("waitForGate() = true with cancelled context, want false")
+		}
+	})
 }
 
 func TestRun_ProcessesOrdersUntilCancelled(t *testing.T) {
-	store := &fakeStore{orders: []models.Order{{Number: "123", UserID: 1, Status: models.OrderStatusNew}}}
-	client := &fakeClient{result: accrual.Result{Status: models.OrderStatusProcessed, Accrual: floatPtr(100)}}
+	synctest.Test(t, func(t *testing.T) {
+		store := &fakeStore{orders: []models.Order{{Number: "123", UserID: 1, Status: models.OrderStatusNew}}}
+		client := &fakeClient{result: accrual.Result{Status: models.OrderStatusProcessed, Accrual: floatPtr(100)}}
 
-	w := New(store, client, zap.NewNop(), 2, 10*time.Millisecond)
+		w := New(store, client, zap.NewNop(), 2, 10*time.Millisecond)
 
-	ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(t.Context())
 
-	done := make(chan struct{})
-	go func() {
-		w.Run(ctx)
-		close(done)
-	}()
+		done := make(chan struct{})
+		go func() {
+			w.Run(ctx)
+			close(done)
+		}()
 
-	// Даём воркеру время хотя бы на один цикл опроса.
-	time.Sleep(100 * time.Millisecond)
-	cancel()
+		// time.Sleep внутри бабла synctest не занимает реальное время: оно
+		// доводит виртуальные часы до момента, когда все горутины бабла
+		// durably заблокированы, в том числе до срабатывания тикера.
+		time.Sleep(15 * time.Millisecond)
+		cancel()
+		<-done
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run() did not return after context cancellation")
-	}
-
-	if len(store.snapshot()) == 0 {
-		t.Error("expected at least one UpdateOrderStatus call")
-	}
+		if len(store.snapshot()) == 0 {
+			t.Error("expected at least one UpdateOrderStatus call")
+		}
+	})
 }

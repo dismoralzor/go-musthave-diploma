@@ -9,14 +9,9 @@ type User struct {
 	PasswordHash string
 }
 
-// RegisterRequest — тело запроса на регистрацию пользователя.
-type RegisterRequest struct {
-	Login    string `json:"login"`
-	Password string `json:"password"`
-}
-
-// LoginRequest — тело запроса на аутентификацию пользователя.
-type LoginRequest struct {
+// Credentials — тело запроса на регистрацию или аутентификацию
+// пользователя: оба запроса принимают одинаковую пару логин/пароль.
+type Credentials struct {
 	Login    string `json:"login"`
 	Password string `json:"password"`
 }

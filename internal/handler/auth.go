@@ -25,7 +25,7 @@ func setAuthToken(w http.ResponseWriter, token string) {
 // Register обрабатывает регистрацию пользователя: создаёт запись в
 // хранилище и, в случае успеха, выдаёт JWT.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
-	var req models.RegisterRequest
+	var req models.Credentials
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -42,7 +42,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, err := h.Users.CreateUser(r.Context(), req.Login, hash)
+	userID, err := h.users.CreateUser(r.Context(), req.Login, hash)
 	if err != nil {
 		if errors.Is(err, storage.ErrLoginTaken) {
 			w.WriteHeader(http.StatusConflict)
@@ -65,7 +65,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 // Login обрабатывает аутентификацию пользователя по логину и паролю и, в
 // случае успеха, выдаёт JWT.
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
-	var req models.LoginRequest
+	var req models.Credentials
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -76,7 +76,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.Users.GetUserByLogin(r.Context(), req.Login)
+	user, err := h.users.GetUserByLogin(r.Context(), req.Login)
 	if err != nil {
 		if errors.Is(err, storage.ErrUserNotFound) {
 			w.WriteHeader(http.StatusUnauthorized)

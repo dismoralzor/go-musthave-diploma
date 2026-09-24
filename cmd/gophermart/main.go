@@ -59,7 +59,6 @@ func run() error {
 	defer func() { _ = logger.Log.Sync() }()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	db, err := storage.Open(ctx, cfg.DatabaseURI)
 	if err != nil {
@@ -90,7 +89,13 @@ func run() error {
 			wrk.Run(ctx)
 		}()
 	}
-	defer workerWG.Wait()
+	// Регистрируется после defer db.Close(), чтобы по LIFO воркер успел
+	// остановиться (stop отменяет ctx) и завершиться раньше, чем закроется
+	// БД, которую он использует.
+	defer func() {
+		stop()
+		workerWG.Wait()
+	}()
 
 	server := &http.Server{
 		Addr:    cfg.RunAddress,

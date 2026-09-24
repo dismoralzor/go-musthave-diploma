@@ -6,8 +6,6 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
-
 	"github.com/dismoralzor/go-musthave-diploma/internal/auth"
 	"github.com/dismoralzor/go-musthave-diploma/internal/logger"
 	"github.com/dismoralzor/go-musthave-diploma/internal/models"
@@ -36,40 +34,35 @@ type BalanceStore interface {
 	GetWithdrawals(ctx context.Context, userID int64) ([]models.Withdrawal, error)
 }
 
-// Handler объединяет HTTP-обработчики сервиса и их зависимости.
+// Handler объединяет HTTP-обработчики сервиса и их зависимости. Поля
+// приватны — зависимости задаются только через New, а извне Handler виден
+// лишь набором методов-обработчиков.
 type Handler struct {
-	Users   UserStore
-	Orders  OrderStore
-	Balance BalanceStore
+	users   UserStore
+	orders  OrderStore
+	balance BalanceStore
 }
 
 // New создаёт новый Handler с хранилищем пользователей users, хранилищем
 // заказов orders и хранилищем баланса balance.
 func New(users UserStore, orders OrderStore, balance BalanceStore) *Handler {
-	return &Handler{Users: users, Orders: orders, Balance: balance}
+	return &Handler{users: users, orders: orders, balance: balance}
 }
 
 // NewRouter собирает http.Handler со всеми маршрутами сервиса и
 // middleware логирования запросов. Регистрация и аутентификация доступны
 // без токена; остальные ручки защищены auth.Middleware.
 func NewRouter(h *Handler) http.Handler {
-	r := chi.NewRouter()
-	r.Use(logger.RequestLogger)
+	mux := http.NewServeMux()
 
-	r.Route("/api/user", func(r chi.Router) {
-		r.Post("/register", h.Register)
-		r.Post("/login", h.Login)
+	mux.HandleFunc("POST /api/user/register", h.Register)
+	mux.HandleFunc("POST /api/user/login", h.Login)
 
-		r.Group(func(r chi.Router) {
-			r.Use(auth.Middleware)
+	mux.Handle("POST /api/user/orders", auth.Middleware(http.HandlerFunc(h.UploadOrder)))
+	mux.Handle("GET /api/user/orders", auth.Middleware(http.HandlerFunc(h.ListOrders)))
+	mux.Handle("GET /api/user/balance", auth.Middleware(http.HandlerFunc(h.GetBalance)))
+	mux.Handle("POST /api/user/balance/withdraw", auth.Middleware(http.HandlerFunc(h.WithdrawBalance)))
+	mux.Handle("GET /api/user/withdrawals", auth.Middleware(http.HandlerFunc(h.ListWithdrawals)))
 
-			r.Post("/orders", h.UploadOrder)
-			r.Get("/orders", h.ListOrders)
-			r.Get("/balance", h.GetBalance)
-			r.Post("/balance/withdraw", h.WithdrawBalance)
-			r.Get("/withdrawals", h.ListWithdrawals)
-		})
-	})
-
-	return r
+	return logger.RequestLogger(mux)
 }

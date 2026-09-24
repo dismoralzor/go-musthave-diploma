@@ -19,7 +19,7 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	balance, err := h.Balance.GetBalance(r.Context(), userID)
+	balance, err := h.balance.GetBalance(r.Context(), userID)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -55,7 +55,7 @@ func (h *Handler) WithdrawBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := h.Balance.Withdraw(r.Context(), userID, req.Order, req.Sum)
+	err := h.balance.Withdraw(r.Context(), userID, req.Order, req.Sum)
 	switch {
 	case err == nil:
 		w.WriteHeader(http.StatusOK)
@@ -75,7 +75,7 @@ func (h *Handler) ListWithdrawals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	withdrawals, err := h.Balance.GetWithdrawals(r.Context(), userID)
+	withdrawals, err := h.balance.GetWithdrawals(r.Context(), userID)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return

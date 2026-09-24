@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -70,18 +71,37 @@ func (s *Storage) GetOrdersByUser(ctx context.Context, userID int64) ([]models.O
 	return orders, nil
 }
 
-// GetOrdersForProcessing возвращает заказы, ещё не обработанные окончательно
-// (в статусе NEW или PROCESSING), для опроса системой начислений. Заказы в
-// статусах INVALID и PROCESSED считаются финальными и не возвращаются.
-func (s *Storage) GetOrdersForProcessing(ctx context.Context) ([]models.Order, error) {
-	const query = `
-		SELECT number, user_id, status
-		FROM orders
-		WHERE status IN ($1, $2)`
+// staleProcessingTimeout — сколько заказ может провисеть в статусе
+// PROCESSING без обновления, прежде чем ClaimOrdersForProcessing сочтёт его
+// зависшим (например, из-за падения инстанса воркера) и возьмёт в работу
+// повторно.
+const staleProcessingTimeout = time.Minute
 
-	rows, err := s.db.QueryContext(ctx, query, models.OrderStatusNew, models.OrderStatusProcessing)
+// ClaimOrdersForProcessing атомарно выбирает до limit заказов, ещё не
+// обработанных окончательно (в статусе NEW, либо зависших в PROCESSING
+// дольше staleProcessingTimeout), и сразу помечает их как PROCESSING одним
+// запросом с FOR UPDATE SKIP LOCKED. Это исключает выборку одного и того же
+// заказа несколькими воркерами или инстансами сервиса одновременно: заказ
+// считается взятым в работу сразу же, без отдельного шага подтверждения.
+func (s *Storage) ClaimOrdersForProcessing(ctx context.Context, limit int) ([]models.Order, error) {
+	// interval '%d seconds' подставляется как константа времени компиляции
+	// запроса (staleProcessingTimeout), а не как параметр: Postgres не умеет
+	// разбирать формат time.Duration.String(), а плейсхолдер типа interval
+	// потребовал бы явного приведения на стороне клиента.
+	query := fmt.Sprintf(`
+		UPDATE orders SET status = $1, updated_at = now()
+		WHERE number IN (
+			SELECT number FROM orders
+			WHERE status = $2 OR (status = $1 AND updated_at < now() - interval '%d seconds')
+			ORDER BY uploaded_at
+			FOR UPDATE SKIP LOCKED
+			LIMIT $3)
+		RETURNING number, user_id, status`, int(staleProcessingTimeout.Seconds()))
+
+	rows, err := s.db.QueryContext(ctx, query,
+		models.OrderStatusProcessing, models.OrderStatusNew, limit)
 	if err != nil {
-		return nil, fmt.Errorf("storage: get orders for processing: %w", err)
+		return nil, fmt.Errorf("storage: claim orders for processing: %w", err)
 	}
 	defer rows.Close()
 
@@ -89,12 +109,12 @@ func (s *Storage) GetOrdersForProcessing(ctx context.Context) ([]models.Order, e
 	for rows.Next() {
 		var o models.Order
 		if err := rows.Scan(&o.Number, &o.UserID, &o.Status); err != nil {
-			return nil, fmt.Errorf("storage: scan order for processing: %w", err)
+			return nil, fmt.Errorf("storage: scan claimed order: %w", err)
 		}
 		orders = append(orders, o)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("storage: get orders for processing: %w", err)
+		return nil, fmt.Errorf("storage: claim orders for processing: %w", err)
 	}
 
 	return orders, nil
@@ -111,7 +131,7 @@ func (s *Storage) UpdateOrderStatus(ctx context.Context, number, status string, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	const updateOrderQuery = `UPDATE orders SET status = $1, accrual = $2 WHERE number = $3`
+	const updateOrderQuery = `UPDATE orders SET status = $1, accrual = $2, updated_at = now() WHERE number = $3`
 
 	if _, err := tx.ExecContext(ctx, updateOrderQuery, status, accrual, number); err != nil {
 		return fmt.Errorf("storage: update order status: %w", err)

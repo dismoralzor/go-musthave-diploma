@@ -42,6 +42,12 @@ type Result struct {
 // есть и опросить позже.
 var ErrNotRegistered = errors.New("accrual: order is not registered")
 
+// ErrUnknownStatus возвращается, если система начислений ответила статусом,
+// не входящим в известный набор (REGISTERED/PROCESSING/INVALID/PROCESSED).
+// В отличие от известных статусов, такой ответ не приводится молча к
+// PROCESSING: вызывающая сторона должна решить, как его обработать.
+var ErrUnknownStatus = errors.New("accrual: unknown order status")
+
 // TooManyRequestsError возвращается, если система начислений ответила
 // 429 Too Many Requests, и указывает, сколько нужно подождать перед
 // следующим запросом.
@@ -90,7 +96,11 @@ func (c *Client) GetOrder(ctx context.Context, number string) (Result, error) {
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 			return Result{}, fmt.Errorf("accrual: decode response: %w", err)
 		}
-		return Result{Status: mapStatus(body.Status), Accrual: body.Accrual}, nil
+		status, err := mapStatus(body.Status)
+		if err != nil {
+			return Result{}, fmt.Errorf("%w: %q", err, body.Status)
+		}
+		return Result{Status: status, Accrual: body.Accrual}, nil
 
 	case http.StatusNoContent:
 		return Result{}, ErrNotRegistered
@@ -104,17 +114,18 @@ func (c *Client) GetOrder(ctx context.Context, number string) (Result, error) {
 }
 
 // mapStatus приводит статус, возвращённый системой начислений, к статусам
-// заказов gophermart.
-func mapStatus(status string) string {
+// заказов gophermart. Для нераспознанного статуса возвращает
+// ErrUnknownStatus вместо того, чтобы молча считать его PROCESSING.
+func mapStatus(status string) (string, error) {
 	switch status {
 	case accrualStatusRegistered, accrualStatusProcessing:
-		return models.OrderStatusProcessing
+		return models.OrderStatusProcessing, nil
 	case accrualStatusInvalid:
-		return models.OrderStatusInvalid
+		return models.OrderStatusInvalid, nil
 	case accrualStatusProcessed:
-		return models.OrderStatusProcessed
+		return models.OrderStatusProcessed, nil
 	default:
-		return models.OrderStatusProcessing
+		return "", ErrUnknownStatus
 	}
 }
 

@@ -102,22 +102,34 @@ func TestGetOrdersByUser_QueryError(t *testing.T) {
 	}
 }
 
-func TestGetOrdersForProcessing(t *testing.T) {
+func TestClaimOrdersForProcessing(t *testing.T) {
 	s, mock := newMockStorage(t)
 
 	rows := sqlmock.NewRows([]string{"number", "user_id", "status"}).
-		AddRow("12345678903", int64(1), models.OrderStatusNew)
+		AddRow("12345678903", int64(1), models.OrderStatusProcessing)
 
-	mock.ExpectQuery("SELECT number, user_id, status FROM orders").
-		WithArgs(models.OrderStatusNew, models.OrderStatusProcessing).
+	mock.ExpectQuery("UPDATE orders SET status = \\$1, updated_at = now\\(\\)").
+		WithArgs(models.OrderStatusProcessing, models.OrderStatusNew, 10).
 		WillReturnRows(rows)
 
-	orders, err := s.GetOrdersForProcessing(context.Background())
+	orders, err := s.ClaimOrdersForProcessing(context.Background(), 10)
 	if err != nil {
-		t.Fatalf("GetOrdersForProcessing() unexpected error: %v", err)
+		t.Fatalf("ClaimOrdersForProcessing() unexpected error: %v", err)
 	}
 	if len(orders) != 1 || orders[0].Number != "12345678903" {
-		t.Errorf("GetOrdersForProcessing() = %+v, unexpected", orders)
+		t.Errorf("ClaimOrdersForProcessing() = %+v, unexpected", orders)
+	}
+}
+
+func TestClaimOrdersForProcessing_QueryError(t *testing.T) {
+	s, mock := newMockStorage(t)
+
+	mock.ExpectQuery("UPDATE orders SET status = \\$1, updated_at = now\\(\\)").
+		WithArgs(models.OrderStatusProcessing, models.OrderStatusNew, 10).
+		WillReturnError(errBoom)
+
+	if _, err := s.ClaimOrdersForProcessing(context.Background(), 10); err == nil {
+		t.Fatal("ClaimOrdersForProcessing() expected error, got nil")
 	}
 }
 
@@ -127,7 +139,7 @@ func TestUpdateOrderStatus_ProcessedWithAccrual(t *testing.T) {
 	accrual := 700.0
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE orders SET status = \\$1, accrual = \\$2 WHERE number = \\$3").
+	mock.ExpectExec("UPDATE orders SET status = \\$1, accrual = \\$2, updated_at = now\\(\\) WHERE number = \\$3").
 		WithArgs(models.OrderStatusProcessed, &accrual, "12345678903").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("UPDATE users SET balance = balance \\+ \\$1 WHERE id = \\$2").
@@ -148,7 +160,7 @@ func TestUpdateOrderStatus_ProcessingNoBalanceUpdate(t *testing.T) {
 	s, mock := newMockStorage(t)
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE orders SET status = \\$1, accrual = \\$2 WHERE number = \\$3").
+	mock.ExpectExec("UPDATE orders SET status = \\$1, accrual = \\$2, updated_at = now\\(\\) WHERE number = \\$3").
 		WithArgs(models.OrderStatusProcessing, nil, "12345678903").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
@@ -166,7 +178,7 @@ func TestUpdateOrderStatus_UpdateError(t *testing.T) {
 	s, mock := newMockStorage(t)
 
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE orders SET status = \\$1, accrual = \\$2 WHERE number = \\$3").
+	mock.ExpectExec("UPDATE orders SET status = \\$1, accrual = \\$2, updated_at = now\\(\\) WHERE number = \\$3").
 		WillReturnError(errBoom)
 	mock.ExpectRollback()
 

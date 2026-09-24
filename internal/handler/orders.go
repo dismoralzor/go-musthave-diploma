@@ -58,7 +58,7 @@ func (h *Handler) UploadOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = h.Orders.CreateOrder(r.Context(), number, userID)
+	err = h.orders.CreateOrder(r.Context(), number, userID)
 	switch {
 	case err == nil:
 		w.WriteHeader(http.StatusAccepted)
@@ -80,7 +80,7 @@ func (h *Handler) ListOrders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orders, err := h.Orders.GetOrdersByUser(r.Context(), userID)
+	orders, err := h.orders.GetOrdersByUser(r.Context(), userID)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return

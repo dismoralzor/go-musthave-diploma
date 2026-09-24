@@ -8,6 +8,8 @@ import (
 )
 
 func TestGenerateAndParseToken(t *testing.T) {
+	t.Setenv("SECRET_KEY", "test-secret")
+
 	const userID int64 = 42
 
 	token, err := GenerateToken(userID)
@@ -24,7 +26,20 @@ func TestGenerateAndParseToken(t *testing.T) {
 	}
 }
 
+func TestGenerateToken_FallsBackToRandomSecretWithoutEnv(t *testing.T) {
+	token, err := GenerateToken(1)
+	if err != nil {
+		t.Fatalf("GenerateToken() unexpected error: %v", err)
+	}
+
+	if _, err := ParseToken(token); err != nil {
+		t.Fatalf("ParseToken() unexpected error: %v", err)
+	}
+}
+
 func TestParseTokenExpired(t *testing.T) {
+	t.Setenv("SECRET_KEY", "test-secret")
+
 	claims := Claims{
 		UserID: 1,
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -33,8 +48,13 @@ func TestParseTokenExpired(t *testing.T) {
 		},
 	}
 
+	key, err := secretKey()
+	if err != nil {
+		t.Fatalf("secretKey() unexpected error: %v", err)
+	}
+
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signed, err := token.SignedString(secretKey())
+	signed, err := token.SignedString(key)
 	if err != nil {
 		t.Fatalf("SignedString() unexpected error: %v", err)
 	}
